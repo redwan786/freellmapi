@@ -7,9 +7,96 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { PageHeader } from '@/components/page-header'
-import type { ApiKey, Platform } from '../../../shared/types'
+import type { ApiKey, Platform, PreviewKey, PreviewResponse, ImportSelectedResponse } from '../../../shared/types'
 import { Pencil, ExternalLink } from 'lucide-react'
 import { formatSqliteUtcToLocalTime } from '@/lib/utils'
+import { DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
+import { ImportPreviewTable } from '@/components/import-preview-table'
+import type { ImportKey } from '@/components/import-preview-table'
+
+// -- Example files for download in the import dialog -------------------------
+
+const EXAMPLE_DOTENV = `# FreeLLMAPI Key Import - .env format
+# Uncomment the provider(s) you want to import, then paste your key.
+# Format: PREFIX_KEY_NAME=your-api-key
+#
+# Provider       | Env-var prefix | Get your key at
+# ---------------+---------------+------------------------------------------
+# Google         | GOOGLE_        | https://aistudio.google.com/apikey
+# Groq           | GROQ_          | https://console.groq.com/keys
+# Cerebras       | CEREBRAS_      | https://cloud.cerebras.ai
+# SambaNova      | SAMBANOVA_     | https://cloud.sambanova.ai
+# NVIDIA         | NVIDIA_        | https://build.nvidia.com/settings/api-keys
+# Mistral        | MISTRAL_       | https://console.mistral.ai/api-keys
+# OpenRouter     | OPENROUTER_    | https://openrouter.ai/keys
+# GitHub         | GITHUB_        | https://github.com/settings/tokens
+# Cohere         | COHERE_        | https://dashboard.cohere.com/api-keys
+# Cloudflare     | CLOUDFLARE_    | https://dash.cloudflare.com
+# Zhipu (Z.ai)   | ZHIPU_         | https://z.ai/manage-apikey/apikey-list
+# Ollama Cloud   | OLLAMA_        | https://ollama.com/settings/keys
+# OpenCode Zen   | OPENCODE_      | https://opencode.ai/auth
+# HuggingFace    | HF_            | https://huggingface.co/settings/tokens
+
+# GOOGLE_API_KEY=AIzaSy...
+# GROQ_API_KEY=gsk_your-groq-key
+# CEREBRAS_API_KEY=cerebras-key-here
+# SAMBANOVA_API_KEY=sambanova-key-here
+# NVIDIA_API_KEY=nvapi-your-nvidia-key
+# MISTRAL_API_KEY=mistral-key-here
+# OPENROUTER_API_KEY=sk-or-v1-your-openrouter-key
+# GITHUB_TOKEN=ghp_your-github-token
+# COHERE_API_KEY=cohere-key-here
+# CLOUDFLARE_API_TOKEN=cf-token-here
+# ZHIPU_API_KEY=zhipu-key-here
+# OLLAMA_API_KEY=ollama-key-here
+# OPENCODE_API_KEY=opencode-key-here
+# HF_API_KEY=hf_your-huggingface-token
+#
+# You can also add multiple keys for the same provider (e.g. two Groq keys):
+# GROQ_API_KEY_1=gsk_your-first-groq-key
+# GROQ_API_KEY_2=gsk_your-second-groq-key
+`
+
+const EXAMPLE_AUTH_JSON = `{
+  "credential_pool": {
+    "gemini": [
+      {
+        "auth_type": "api_key",
+        "access_token": "AIzaSy...",
+        "label": "my-gemini-key"
+      }
+    ],
+    "openrouter": [
+      {
+        "auth_type": "api_key",
+        "access_token": "sk-or-v1-...",
+        "label": "my-openrouter-key"
+      }
+    ],
+    "ollama-cloud": [
+      {
+        "auth_type": "api_key",
+        "access_token": "ollama-key-here",
+        "label": "my-ollama-key"
+      }
+    ],
+    "nvidia": [
+      {
+        "auth_type": "api_key",
+        "access_token": "nvapi-...",
+        "label": "my-nvidia-key"
+      }
+    ],
+    "opencode-zen": [
+      {
+        "auth_type": "api_key",
+        "access_token": "opencode-key-here",
+        "label": "my-opencode-key"
+      }
+    ]
+  }
+}
+`
 
 // Small "Get API key" external link shown next to a provider (#137).
 function GetKeyLink({ url }: { url: string }) {
@@ -261,6 +348,50 @@ export default function KeysPage() {
   const [editingLabel, setEditingLabel] = useState('')
   const editInputRef = useRef<HTMLInputElement>(null)
 
+  // Modal state
+  const [importOpen, setImportOpen] = useState(false)
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([])
+  const [previewResult, setPreviewResult] = useState<PreviewKey[] | null>(null)
+  const [step, setStep] = useState<'upload' | 'preview' | 'results'>('upload')
+  const [selectedImportKeys, setSelectedImportKeys] = useState<ImportKey[]>([])
+  const [importResult, setImportResult] = useState<ImportSelectedResponse | null>(null)
+  const [importError, setImportError] = useState<string | null>(null)
+
+  const previewMutation = useMutation({
+    mutationFn: async (files: File[]) => {
+      const formData = new FormData()
+      files.forEach(f => formData.append('files', f))
+      return apiFetch<PreviewResponse>('/api/keys/preview', {
+        method: 'POST',
+        body: formData,
+      })
+    },
+    onSuccess: (data) => {
+      setPreviewResult(data.keys)
+      setStep('preview')
+    },
+    onError: (error) => {
+      setImportError((error as Error).message)
+    },
+  })
+
+  const importSelectedMutation = useMutation({
+    mutationFn: async (keys: ImportKey[]) =>
+      apiFetch<ImportSelectedResponse>('/api/keys/import-selected', {
+        method: 'POST',
+        body: JSON.stringify({ keys }),
+      }),
+    onSuccess: (data) => {
+      setImportResult(data)
+      setStep('results')
+      queryClient.invalidateQueries({ queryKey: ['keys'] })
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+    },
+    onError: (error) => {
+      setImportError((error as Error).message)
+    },
+  })
+
   const { data: keys = [], isLoading } = useQuery<ApiKey[]>({
     queryKey: ['keys'],
     queryFn: () => apiFetch('/api/keys'),
@@ -380,33 +511,48 @@ export default function KeysPage() {
   })).filter(p => p.keys.length > 0)
 
   return (
-    <div>
-      <PageHeader
-        title="Keys"
-        description="Provider credentials and the unified API key your apps connect with."
-        actions={
-          keys.length > 0 && (
-            <Button variant="outline" size="sm" onClick={() => checkAll.mutate()} disabled={checkAll.isPending}>
-              {checkAll.isPending ? 'Checking…' : 'Check all'}
-            </Button>
-          )
-        }
-      />
+    <DialogRoot open={importOpen} onOpenChange={setImportOpen}>
+      <div>
+        <PageHeader
+          title="Keys"
+          description="Provider credentials and the unified API key your apps connect with."
+          actions={
+            <div className="flex items-center gap-2">
+              {keys.length > 0 && (
+                <Button variant="outline" size="sm" onClick={() => checkAll.mutate()} disabled={checkAll.isPending}>
+                  {checkAll.isPending ? 'Checking…' : 'Check all'}
+                </Button>
+              )}
+              <Button size="sm" onClick={() => { setImportOpen(true); setStep('upload'); setSelectedFiles([]); setPreviewResult(null); setSelectedImportKeys([]); setImportResult(null); setImportError(null); }}>
+                Import keys
+              </Button>
+            </div>
+          }
+        />
 
       <div className="space-y-8">
         <UnifiedKeySection />
 
+
+
         <section>
-          <h2 className="text-sm font-medium mb-3">Add a provider key</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-medium">Add a provider key</h2>
+            <div className="flex items-center gap-2">           
+              <Button variant="outline" size="xs" onClick={() => setImportOpen(true)}>
+                Batch Import
+              </Button>
+            </div>
+          </div>
           <form onSubmit={handleSubmit} className="flex flex-wrap items-end gap-3 rounded-lg border p-4 bg-card">
             <div className="space-y-1.5">
               <Label className="text-xs">Platform</Label>
-              <Select value={platform} onValueChange={(v) => setPlatform(v as Platform)}>
+              <Select value={platform} onValueChange={(v) => setPlatform(v as Platform)} aria-label="Platform">
                 <SelectTrigger className="w-[220px]">
                   <SelectValue placeholder="Select provider" />
                 </SelectTrigger>
                 <SelectContent>
-                  {PLATFORMS.map(p => (
+                  {PLATFORMS.slice().sort((a,b)=>a.label.localeCompare(b.label)).map(p => (
                     <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
                   ))}
                 </SelectContent>
@@ -550,5 +696,125 @@ export default function KeysPage() {
         </section>
       </div>
     </div>
+
+      <DialogPortal>
+        <DialogOverlay />
+        <DialogContent className="sm:max-w-[800px]">
+          <DialogHeader>
+            <DialogTitle>
+              {step === 'upload' && 'Import API Keys'}
+              {step === 'preview' && 'Review imported keys'}
+              {step === 'results' && 'Import results'}
+            </DialogTitle>
+            <DialogDescription>
+              {step === 'upload' && 'Upload .env, .json, .md, .txt, or .jsonc files'}
+              {step === 'preview' && 'Check which keys to import, edit platforms and values'}
+              {step === 'results' && importResult && `Imported ${importResult.imported} of ${importResult.total} key(s)`}
+            </DialogDescription>
+          </DialogHeader>
+
+          {step === 'upload' && (
+            <div className="space-y-4">
+
+              {/* ── Download example files ─────────────────────────────── */}
+              <div className="rounded-lg border border-dashed p-4">
+                <p className="text-xs text-muted-foreground mb-2">
+                  Need a template? Download an example file with the expected format:
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onClick={() => {
+                      const blob = new Blob([EXAMPLE_DOTENV], { type: 'text/plain' })
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url; a.download = 'example.env'
+                      a.click()
+                      URL.revokeObjectURL(url)
+                    }}
+                  >
+                    Download .env example
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onClick={() => {
+                      const blob = new Blob([EXAMPLE_AUTH_JSON], { type: 'application/json' })
+                      const url = URL.createObjectURL(blob)
+                      const a = document.createElement('a')
+                      a.href = url; a.download = 'auth.json'
+                      a.click()
+                      URL.revokeObjectURL(url)
+                    }}
+                  >
+                    Download auth.json example
+                  </Button>
+                </div>
+              </div>
+
+              <Input
+                type="file"
+                multiple
+                accept=".env,.json,.md,.txt,.jsonc"
+                onChange={(e) => setSelectedFiles(Array.from(e.target.files || []))}
+                className="file:mr-3 file:rounded-md file:border file:border-input file:bg-muted file:px-3 file:py-1.5 file:text-xs file:font-medium"
+              />
+              {importError && <p className="text-xs text-destructive">{importError}</p>}
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setImportOpen(false)}>Cancel</Button>
+                <Button
+                  onClick={() => { setImportError(null); previewMutation.mutate(selectedFiles); }}
+                  disabled={selectedFiles.length === 0 || previewMutation.isPending}
+                >
+                  {previewMutation.isPending ? 'Parsing…' : 'Preview'}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {step === 'preview' && previewResult && (
+            <div className="max-h-[70vh] overflow-y-auto space-y-4 pr-1">
+              <ImportPreviewTable
+                keys={previewResult}
+                onSelectionChange={setSelectedImportKeys}
+              />
+              {importError && <p className="text-xs text-destructive">{importError}</p>}
+              <div className="flex justify-end gap-2 sticky bottom-0 bg-background pt-2 pb-1">
+                <Button variant="outline" onClick={() => setStep('upload')}>Back</Button>
+                <Button
+                  onClick={() => {
+                    setImportError(null)
+                    importSelectedMutation.mutate(selectedImportKeys)
+                  }}
+                  disabled={selectedImportKeys.length === 0 || importSelectedMutation.isPending}
+                >
+                  {importSelectedMutation.isPending ? 'Importing…' : 'Import selected'}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {step === 'results' && importResult && (
+            <div className="space-y-4">
+              <p className="text-sm">Successfully imported {importResult.imported} key(s)</p>
+              {importResult.errors.length > 0 && (
+                <div className="rounded-md border border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-950/30 px-3 py-2">
+                  <p className="text-xs font-medium text-red-700 dark:text-red-400">Errors</p>
+                  {importResult.errors.map((e, i) => (
+                    <p key={i} className="text-xs text-red-600 dark:text-red-500 mt-0.5 font-mono">{e.key}: {e.error}</p>
+                  ))}
+                </div>
+              )}
+              <div className="flex justify-end">
+                <Button onClick={() => { setImportOpen(false); setPreviewResult(null); setImportResult(null); }}>Done</Button>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter />
+        </DialogContent>
+      </DialogPortal>
+    </DialogRoot>
   )
 }
