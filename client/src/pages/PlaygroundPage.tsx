@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Paperclip, X } from 'lucide-react'
+import { Paperclip, X, FileText } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
+import { extractPdfText } from '@/lib/pdf'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageHeader } from '@/components/page-header'
@@ -19,12 +20,22 @@ interface FallbackEntry {
   keyCount: number
 }
 
+// An extracted PDF: the text is folded into the outbound message; name/pages
+// drive the chip shown in the UI. Kept in history so multi-turn re-sends the
+// document context.
+interface PdfDoc {
+  name: string
+  pages: number
+  text: string
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   // Data-URL images attached to a user turn (vision input). Kept in history so
   // the whole multimodal conversation is replayed on each send.
   images?: string[]
+  docs?: PdfDoc[]
   meta?: {
     platform?: string
     model?: string
@@ -41,6 +52,7 @@ type OutboundContent =
 // Per-image cap. Images are base64-inlined into the JSON body; the server
 // accepts up to 10mb total (express.json limit), so keep each well under that.
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+const MAX_PDF_BYTES = 25 * 1024 * 1024
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -51,13 +63,23 @@ function readFileAsDataUrl(file: File): Promise<string> {
   })
 }
 
+// Combine the typed text with any attached PDF text into a single string.
+function buildText(msg: ChatMessage): string {
+  let text = msg.content
+  for (const doc of msg.docs ?? []) {
+    text += `${text ? '\n\n' : ''}--- PDF: ${doc.name} (${doc.pages} page${doc.pages === 1 ? '' : 's'}) ---\n${doc.text}`
+  }
+  return text
+}
+
 // Build the outbound content for one message: a plain string when there are no
 // images, otherwise the OpenAI multimodal array (text block first, then one
-// image_url block per attachment).
+// image_url block per attachment). PDF text is folded into the text part.
 function toOutboundContent(msg: ChatMessage): OutboundContent {
-  if (!msg.images || msg.images.length === 0) return msg.content
+  const text = buildText(msg)
+  if (!msg.images || msg.images.length === 0) return text
   const blocks: Exclude<OutboundContent, string> = []
-  if (msg.content) blocks.push({ type: 'text', text: msg.content })
+  if (text) blocks.push({ type: 'text', text })
   for (const url of msg.images) blocks.push({ type: 'image_url', image_url: { url } })
   return blocks
 }
@@ -66,7 +88,9 @@ export default function PlaygroundPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [images, setImages] = useState<string[]>([])
+  const [docs, setDocs] = useState<PdfDoc[]>([])
   const [attachError, setAttachError] = useState<string | null>(null)
+  const [parsing, setParsing] = useState(false)
   const [loading, setLoading] = useState(false)
   const [selectedModel, setSelectedModel] = useState<string>('auto')
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -99,18 +123,49 @@ export default function PlaygroundPage() {
 
   const addFiles = async (files: FileList | File[]) => {
     setAttachError(null)
-    const picked = Array.from(files).filter(f => f.type.startsWith('image/'))
-    if (picked.length === 0) return
-    const tooBig = picked.find(f => f.size > MAX_IMAGE_BYTES)
-    if (tooBig) {
-      setAttachError(`${tooBig.name} is over 5 MB — pick a smaller image.`)
-      return
+    const all = Array.from(files)
+    const pdfFiles = all.filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'))
+    const imageFiles = all.filter(f => f.type.startsWith('image/'))
+
+    // Images need a vision-capable model; PDFs are sent as text, so they're
+    // always allowed.
+    if (imageFiles.length > 0 && !canAttach) {
+      setAttachError('Enable a vision-capable model to attach images (PDFs are fine).')
+    } else if (imageFiles.length > 0) {
+      const tooBig = imageFiles.find(f => f.size > MAX_IMAGE_BYTES)
+      if (tooBig) {
+        setAttachError(`${tooBig.name} is over 5 MB — pick a smaller image.`)
+      } else {
+        try {
+          const urls = await Promise.all(imageFiles.map(readFileAsDataUrl))
+          setImages(prev => [...prev, ...urls])
+        } catch (err: any) {
+          setAttachError(err.message ?? 'Could not read image')
+        }
+      }
     }
-    try {
-      const urls = await Promise.all(picked.map(readFileAsDataUrl))
-      setImages(prev => [...prev, ...urls])
-    } catch (err: any) {
-      setAttachError(err.message ?? 'Could not read image')
+
+    if (pdfFiles.length > 0) {
+      const tooBig = pdfFiles.find(f => f.size > MAX_PDF_BYTES)
+      if (tooBig) {
+        setAttachError(`${tooBig.name} is over 25 MB — pick a smaller PDF.`)
+        return
+      }
+      setParsing(true)
+      try {
+        for (const file of pdfFiles) {
+          const { text, pages } = await extractPdfText(file)
+          if (!text) {
+            setAttachError(`${file.name} has no extractable text (it may be a scanned image PDF).`)
+            continue
+          }
+          setDocs(prev => [...prev, { name: file.name, pages, text }])
+        }
+      } catch (err: any) {
+        setAttachError(err.message ?? 'Could not read PDF')
+      } finally {
+        setParsing(false)
+      }
     }
   }
 
@@ -136,19 +191,25 @@ export default function PlaygroundPage() {
     setImages(prev => prev.filter((_, i) => i !== idx))
   }
 
+  const removeDoc = (idx: number) => {
+    setDocs(prev => prev.filter((_, i) => i !== idx))
+  }
+
   const handleSend = async () => {
     const text = input.trim()
-    if ((!text && images.length === 0) || loading) return
+    if ((!text && images.length === 0 && docs.length === 0) || loading) return
 
     const userMsg: ChatMessage = {
       role: 'user',
       content: text,
       ...(images.length > 0 ? { images } : {}),
+      ...(docs.length > 0 ? { docs } : {}),
     }
     const newMessages = [...messages, userMsg]
     setMessages(newMessages)
     setInput('')
     setImages([])
+    setDocs([])
     setAttachError(null)
     setLoading(true)
     inputRef.current?.focus()
@@ -221,6 +282,7 @@ export default function PlaygroundPage() {
   const handleClear = () => {
     setMessages([])
     setImages([])
+    setDocs([])
     setAttachError(null)
     inputRef.current?.focus()
   }
@@ -229,7 +291,7 @@ export default function PlaygroundPage() {
     ? 'Auto (fallback chain)'
     : availableModels.find(m => m.modelId === selectedModel)?.displayName ?? selectedModel
 
-  const canSend = !loading && (input.trim().length > 0 || images.length > 0)
+  const canSend = !loading && !parsing && (input.trim().length > 0 || images.length > 0 || docs.length > 0)
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
@@ -297,6 +359,20 @@ export default function PlaygroundPage() {
                         ))}
                       </div>
                     )}
+                    {msg.docs && msg.docs.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {msg.docs.map((doc, j) => (
+                          <span
+                            key={j}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-black/10 px-2 py-1 text-xs"
+                          >
+                            <FileText className="size-3.5" />
+                            <span className="max-w-[160px] truncate">{doc.name}</span>
+                            <span className="opacity-70">· {doc.pages}p</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                     {msg.role === 'assistant' ? (
                       <Markdown>{msg.content}</Markdown>
                     ) : (
@@ -332,11 +408,11 @@ export default function PlaygroundPage() {
         </div>
 
         <div className="border-t bg-background/50 p-3">
-          {/* Pending image attachments preview */}
-          {images.length > 0 && (
-            <div className="flex flex-wrap gap-2 mb-2">
+          {/* Pending attachments preview */}
+          {(images.length > 0 || docs.length > 0 || parsing) && (
+            <div className="flex flex-wrap gap-2 mb-2 items-center">
               {images.map((src, i) => (
-                <div key={i} className="relative group">
+                <div key={`img-${i}`} className="relative group">
                   <img
                     src={src}
                     alt={`pending ${i + 1}`}
@@ -352,6 +428,25 @@ export default function PlaygroundPage() {
                   </button>
                 </div>
               ))}
+              {docs.map((doc, i) => (
+                <span
+                  key={`doc-${i}`}
+                  className="inline-flex items-center gap-1.5 rounded-lg border bg-muted px-2 py-1.5 text-xs"
+                >
+                  <FileText className="size-3.5 shrink-0" />
+                  <span className="max-w-[160px] truncate">{doc.name}</span>
+                  <span className="text-muted-foreground">· {doc.pages}p</span>
+                  <button
+                    type="button"
+                    onClick={() => removeDoc(i)}
+                    aria-label="Remove PDF"
+                    className="ml-0.5 text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </span>
+              ))}
+              {parsing && <span className="text-xs text-muted-foreground">Reading PDF…</span>}
             </div>
           )}
 
@@ -361,8 +456,8 @@ export default function PlaygroundPage() {
           {!canAttach && (
             <p className="text-xs text-muted-foreground mb-2">
               {selectedModel === 'auto'
-                ? 'No vision-capable model is enabled — enable one in the Fallback Chain to attach images.'
-                : 'The selected model has no vision support — switch to Auto or a vision model to attach images.'}
+                ? 'No vision model enabled — images need one (enable it in the Fallback Chain). PDFs work with any model.'
+                : 'The selected model has no vision support — images need Auto or a vision model. PDFs work with any model.'}
             </p>
           )}
 
@@ -370,7 +465,7 @@ export default function PlaygroundPage() {
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept="image/*,application/pdf"
               multiple
               className="hidden"
               onChange={handleFileChange}
@@ -379,8 +474,8 @@ export default function PlaygroundPage() {
               variant="outline"
               size="icon"
               className="shrink-0"
-              disabled={!canAttach || loading}
-              title={canAttach ? 'Attach image' : 'Enable a vision model to attach images'}
+              disabled={loading || parsing}
+              title="Attach image or PDF"
               onClick={() => fileInputRef.current?.click()}
             >
               <Paperclip className="size-4" />
