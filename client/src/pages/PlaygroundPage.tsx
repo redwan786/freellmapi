@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Paperclip, X } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -14,12 +15,16 @@ interface FallbackEntry {
   modelId: string
   displayName: string
   sizeLabel: string
+  supportsVision: boolean
   keyCount: number
 }
 
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+  // Data-URL images attached to a user turn (vision input). Kept in history so
+  // the whole multimodal conversation is replayed on each send.
+  images?: string[]
   meta?: {
     platform?: string
     model?: string
@@ -28,13 +33,45 @@ interface ChatMessage {
   }
 }
 
+// OpenAI multimodal content block, built only when a turn carries images.
+type OutboundContent =
+  | string
+  | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>
+
+// Per-image cap. Images are base64-inlined into the JSON body; the server
+// accepts up to 10mb total (express.json limit), so keep each well under that.
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`))
+    reader.readAsDataURL(file)
+  })
+}
+
+// Build the outbound content for one message: a plain string when there are no
+// images, otherwise the OpenAI multimodal array (text block first, then one
+// image_url block per attachment).
+function toOutboundContent(msg: ChatMessage): OutboundContent {
+  if (!msg.images || msg.images.length === 0) return msg.content
+  const blocks: Exclude<OutboundContent, string> = []
+  if (msg.content) blocks.push({ type: 'text', text: msg.content })
+  for (const url of msg.images) blocks.push({ type: 'image_url', image_url: { url } })
+  return blocks
+}
+
 export default function PlaygroundPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
+  const [images, setImages] = useState<string[]>([])
+  const [attachError, setAttachError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [selectedModel, setSelectedModel] = useState<string>('auto')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { data: keyData } = useQuery<{ apiKey: string }>({
     queryKey: ['unified-key'],
@@ -47,19 +84,72 @@ export default function PlaygroundPage() {
   })
 
   const availableModels = fallbackEntries.filter(e => e.keyCount > 0 && e.enabled)
+  // Image upload only makes sense when a vision-capable model can serve it.
+  // When the user has pinned a specific model, gate on that model's capability;
+  // for Auto, any enabled vision model in the chain will do.
+  const hasVisionModel = availableModels.some(m => m.supportsVision)
+  const pinnedSupportsVision = selectedModel === 'auto'
+    ? hasVisionModel
+    : availableModels.find(m => m.modelId === selectedModel)?.supportsVision ?? false
+  const canAttach = pinnedSupportsVision
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  const addFiles = async (files: FileList | File[]) => {
+    setAttachError(null)
+    const picked = Array.from(files).filter(f => f.type.startsWith('image/'))
+    if (picked.length === 0) return
+    const tooBig = picked.find(f => f.size > MAX_IMAGE_BYTES)
+    if (tooBig) {
+      setAttachError(`${tooBig.name} is over 5 MB — pick a smaller image.`)
+      return
+    }
+    try {
+      const urls = await Promise.all(picked.map(readFileAsDataUrl))
+      setImages(prev => [...prev, ...urls])
+    } catch (err: any) {
+      setAttachError(err.message ?? 'Could not read image')
+    }
+  }
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) await addFiles(e.target.files)
+    // Reset so picking the same file again still fires onChange.
+    e.target.value = ''
+  }
+
+  const handlePaste = async (e: React.ClipboardEvent) => {
+    const imageItems = Array.from(e.clipboardData.files).filter(f => f.type.startsWith('image/'))
+    if (imageItems.length > 0) {
+      e.preventDefault()
+      if (!canAttach) {
+        setAttachError('Enable a vision-capable model to attach images.')
+        return
+      }
+      await addFiles(imageItems)
+    }
+  }
+
+  const removeImage = (idx: number) => {
+    setImages(prev => prev.filter((_, i) => i !== idx))
+  }
+
   const handleSend = async () => {
     const text = input.trim()
-    if (!text || loading) return
+    if ((!text && images.length === 0) || loading) return
 
-    const userMsg: ChatMessage = { role: 'user', content: text }
+    const userMsg: ChatMessage = {
+      role: 'user',
+      content: text,
+      ...(images.length > 0 ? { images } : {}),
+    }
     const newMessages = [...messages, userMsg]
     setMessages(newMessages)
     setInput('')
+    setImages([])
+    setAttachError(null)
     setLoading(true)
     inputRef.current?.focus()
 
@@ -68,7 +158,7 @@ export default function PlaygroundPage() {
       if (keyData?.apiKey) headers['Authorization'] = `Bearer ${keyData.apiKey}`
 
       const body: any = {
-        messages: newMessages.map(m => ({ role: m.role, content: m.content })),
+        messages: newMessages.map(m => ({ role: m.role, content: toOutboundContent(m) })),
       }
       if (selectedModel !== 'auto') body.model = selectedModel
 
@@ -130,12 +220,16 @@ export default function PlaygroundPage() {
 
   const handleClear = () => {
     setMessages([])
+    setImages([])
+    setAttachError(null)
     inputRef.current?.focus()
   }
 
   const activeModelLabel = selectedModel === 'auto'
     ? 'Auto (fallback chain)'
     : availableModels.find(m => m.modelId === selectedModel)?.displayName ?? selectedModel
+
+  const canSend = !loading && (input.trim().length > 0 || images.length > 0)
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)]">
@@ -191,10 +285,22 @@ export default function PlaygroundPage() {
                         : 'bg-muted'
                     }`}
                   >
+                    {msg.images && msg.images.length > 0 && (
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {msg.images.map((src, j) => (
+                          <img
+                            key={j}
+                            src={src}
+                            alt={`attachment ${j + 1}`}
+                            className="rounded-lg max-h-40 max-w-[200px] object-cover border border-black/10"
+                          />
+                        ))}
+                      </div>
+                    )}
                     {msg.role === 'assistant' ? (
                       <Markdown>{msg.content}</Markdown>
                     ) : (
-                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                      msg.content && <div className="whitespace-pre-wrap">{msg.content}</div>
                     )}
                     {msg.meta && (
                       <div className="flex items-center gap-2 mt-2 flex-wrap text-[11px] opacity-70 tabular-nums">
@@ -226,12 +332,65 @@ export default function PlaygroundPage() {
         </div>
 
         <div className="border-t bg-background/50 p-3">
+          {/* Pending image attachments preview */}
+          {images.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-2">
+              {images.map((src, i) => (
+                <div key={i} className="relative group">
+                  <img
+                    src={src}
+                    alt={`pending ${i + 1}`}
+                    className="size-16 rounded-lg object-cover border"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeImage(i)}
+                    aria-label="Remove image"
+                    className="absolute -top-1.5 -right-1.5 rounded-full bg-background border shadow-sm p-0.5 text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {attachError && (
+            <p className="text-xs text-destructive mb-2">{attachError}</p>
+          )}
+          {!canAttach && (
+            <p className="text-xs text-muted-foreground mb-2">
+              {selectedModel === 'auto'
+                ? 'No vision-capable model is enabled — enable one in the Fallback Chain to attach images.'
+                : 'The selected model has no vision support — switch to Auto or a vision model to attach images.'}
+            </p>
+          )}
+
           <div className="flex gap-2 items-end">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={handleFileChange}
+            />
+            <Button
+              variant="outline"
+              size="icon"
+              className="shrink-0"
+              disabled={!canAttach || loading}
+              title={canAttach ? 'Attach image' : 'Enable a vision model to attach images'}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Paperclip className="size-4" />
+            </Button>
             <textarea
               ref={inputRef}
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               placeholder="Type a message… (⏎ to send, ⇧⏎ for newline)"
               rows={1}
               className="flex-1 resize-none rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring/50 min-h-[40px] max-h-[160px]"
@@ -242,7 +401,7 @@ export default function PlaygroundPage() {
                 el.style.height = Math.min(el.scrollHeight, 160) + 'px'
               }}
             />
-            <Button onClick={handleSend} disabled={loading || !input.trim()} size="default">
+            <Button onClick={handleSend} disabled={!canSend} size="default">
               {loading ? 'Sending…' : 'Send'}
             </Button>
           </div>
