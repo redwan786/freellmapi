@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Paperclip, X, FileText } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
-import { extractPdfText } from '@/lib/pdf'
+import { extractPdfText, renderPdfToImages } from '@/lib/pdf'
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageHeader } from '@/components/page-header'
@@ -49,11 +49,8 @@ type OutboundContent =
   | string
   | Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }>
 
-// Per-image cap. Images are base64-inlined into the JSON body; the server
-// accepts up to 10mb total (express.json limit), so keep each well under that.
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024
-const MAX_PDF_BYTES = 25 * 1024 * 1024
-
+// Images are base64-inlined into the JSON body; the server body limit is the
+// effective ceiling, not a per-file cap here.
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -132,34 +129,38 @@ export default function PlaygroundPage() {
     if (imageFiles.length > 0 && !canAttach) {
       setAttachError('Enable a vision-capable model to attach images (PDFs are fine).')
     } else if (imageFiles.length > 0) {
-      const tooBig = imageFiles.find(f => f.size > MAX_IMAGE_BYTES)
-      if (tooBig) {
-        setAttachError(`${tooBig.name} is over 5 MB — pick a smaller image.`)
-      } else {
-        try {
-          const urls = await Promise.all(imageFiles.map(readFileAsDataUrl))
-          setImages(prev => [...prev, ...urls])
-        } catch (err: any) {
-          setAttachError(err.message ?? 'Could not read image')
-        }
+      try {
+        const urls = await Promise.all(imageFiles.map(readFileAsDataUrl))
+        setImages(prev => [...prev, ...urls])
+      } catch (err: any) {
+        setAttachError(err.message ?? 'Could not read image')
       }
     }
 
     if (pdfFiles.length > 0) {
-      const tooBig = pdfFiles.find(f => f.size > MAX_PDF_BYTES)
-      if (tooBig) {
-        setAttachError(`${tooBig.name} is over 25 MB — pick a smaller PDF.`)
-        return
-      }
       setParsing(true)
       try {
         for (const file of pdfFiles) {
           const { text, pages } = await extractPdfText(file)
-          if (!text) {
-            setAttachError(`${file.name} has no extractable text (it may be a scanned image PDF).`)
+          if (text) {
+            setDocs(prev => [...prev, { name: file.name, pages, text }])
             continue
           }
-          setDocs(prev => [...prev, { name: file.name, pages, text }])
+          // No selectable text — a scanned/image PDF. Render its pages to
+          // images and route them to a vision model instead. Needs one enabled.
+          if (!canAttach) {
+            setAttachError(`${file.name} is a scanned PDF (image-only). Enable a vision model to read it.`)
+            continue
+          }
+          const { images: pageImages, pages: total, rendered } = await renderPdfToImages(file)
+          if (pageImages.length === 0) {
+            setAttachError(`${file.name} could not be read.`)
+            continue
+          }
+          setImages(prev => [...prev, ...pageImages])
+          if (rendered < total) {
+            setAttachError(`${file.name} is a scanned PDF — sent the first ${rendered} of ${total} pages as images.`)
+          }
         }
       } catch (err: any) {
         setAttachError(err.message ?? 'Could not read PDF')
