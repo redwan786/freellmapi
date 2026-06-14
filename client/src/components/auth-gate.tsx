@@ -19,20 +19,43 @@ function Centered({ children }: { children: ReactNode }) {
   )
 }
 
-function AuthForm({ mode, onAuthed }: { mode: 'setup' | 'login'; onAuthed: () => void }) {
+type AuthMode = 'setup' | 'login' | 'signup'
+
+const COPY: Record<AuthMode, { title: string; subtitle: string; cta: string; busy: string; endpoint: string; pwAutoComplete: string; pwPlaceholder: string }> = {
+  setup: {
+    title: 'Create your account',
+    subtitle: 'Set the email and password that will protect this dashboard.',
+    cta: 'Create account', busy: 'Creating…', endpoint: '/api/auth/setup',
+    pwAutoComplete: 'new-password', pwPlaceholder: 'at least 8 characters',
+  },
+  signup: {
+    title: 'Create your account',
+    subtitle: 'Sign up to get your own isolated keys, routing, and analytics.',
+    cta: 'Sign up', busy: 'Creating…', endpoint: '/api/auth/signup',
+    pwAutoComplete: 'new-password', pwPlaceholder: 'at least 8 characters',
+  },
+  login: {
+    title: 'Welcome back',
+    subtitle: 'Sign in to manage your keys, routing, and analytics.',
+    cta: 'Sign in', busy: 'Signing in…', endpoint: '/api/auth/login',
+    pwAutoComplete: 'current-password', pwPlaceholder: 'your password',
+  },
+}
+
+function AuthForm({ initialMode, allowToggle, onAuthed }: { initialMode: AuthMode; allowToggle: boolean; onAuthed: () => void }) {
+  const [mode, setMode] = useState<AuthMode>(initialMode)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-
-  const isSetup = mode === 'setup'
+  const c = COPY[mode]
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError('')
     try {
-      const res = await apiFetch<{ token: string }>(isSetup ? '/api/auth/setup' : '/api/auth/login', {
+      const res = await apiFetch<{ token: string }>(c.endpoint, {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       })
@@ -47,17 +70,30 @@ function AuthForm({ mode, onAuthed }: { mode: 'setup' | 'login'; onAuthed: () =>
 
   return (
     <Centered>
-      <div className="mb-6 flex items-center gap-2">
+      <div className="mb-6 flex items-center justify-center gap-2">
         <span className="inline-block size-2 rounded-full bg-foreground" />
         <span className="font-semibold tracking-tight text-sm">FreeLLMAPI</span>
       </div>
-      <div className="rounded-3xl border bg-card p-6">
-        <h1 className="text-base font-medium">{isSetup ? 'Create your account' : 'Sign in'}</h1>
-        <p className="text-xs text-muted-foreground mt-1 mb-4">
-          {isSetup
-            ? 'Set the email and password that will protect this dashboard.'
-            : 'Sign in to manage your keys, routing, and analytics.'}
-        </p>
+      <div className="rounded-3xl border bg-card p-6 shadow-sm">
+        {/* Sign in / Sign up segmented toggle (hidden during first-run setup) */}
+        {allowToggle && (
+          <div className="mb-5 grid grid-cols-2 gap-1 rounded-xl bg-muted p-1 text-sm">
+            {(['login', 'signup'] as const).map(m => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => { setMode(m); setError('') }}
+                className={`rounded-lg py-1.5 font-medium transition-colors ${
+                  mode === m ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {m === 'login' ? 'Sign in' : 'Sign up'}
+              </button>
+            ))}
+          </div>
+        )}
+        <h1 className="text-lg font-semibold tracking-tight">{c.title}</h1>
+        <p className="text-xs text-muted-foreground mt-1 mb-4">{c.subtitle}</p>
         <form onSubmit={submit} className="space-y-3">
           <div className="space-y-1.5">
             <Label className="text-xs" htmlFor="auth-email">Email</Label>
@@ -75,15 +111,15 @@ function AuthForm({ mode, onAuthed }: { mode: 'setup' | 'login'; onAuthed: () =>
             <Input
               id="auth-password"
               type="password"
-              autoComplete={isSetup ? 'new-password' : 'current-password'}
+              autoComplete={c.pwAutoComplete}
               value={password}
               onChange={e => setPassword(e.target.value)}
-              placeholder={isSetup ? 'at least 8 characters' : 'your password'}
+              placeholder={c.pwPlaceholder}
             />
           </div>
           {error && <p className="text-destructive text-xs">{error}</p>}
           <Button type="submit" className="w-full" disabled={busy || !email || !password}>
-            {busy ? (isSetup ? 'Creating…' : 'Signing in…') : isSetup ? 'Create account' : 'Sign in'}
+            {busy ? c.busy : c.cta}
           </Button>
         </form>
       </div>
@@ -122,8 +158,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
     )
   }
 
-  if (data.needsSetup) return <AuthForm mode="setup" onAuthed={onAuthed} />
-  if (!data.authenticated) return <AuthForm mode="login" onAuthed={onAuthed} />
+  if (data.needsSetup) return <AuthForm initialMode="setup" allowToggle={false} onAuthed={onAuthed} />
+  if (!data.authenticated) return <AuthForm initialMode="login" allowToggle onAuthed={onAuthed} />
 
   return <>{children}</>
 }

@@ -15,6 +15,9 @@ import {
 } from '../services/router.js';
 import type { RoutingStrategy } from '../services/scoring.js';
 
+// All sim data belongs to one synthetic user (multi-tenant routing is keyed by user).
+const SIM_USER = 1;
+
 interface Profile {
   platform: string; modelId: string; name: string;
   intelligenceRank: number; sizeLabel: string; budget: string;
@@ -42,28 +45,28 @@ function seed() {
     INSERT INTO models (platform, model_id, display_name, intelligence_rank, speed_rank, size_label, rpm_limit, rpd_limit, tpm_limit, tpd_limit, monthly_token_budget, enabled)
     VALUES (?, ?, ?, ?, 1, ?, 100000, 1000000, 100000000, 1000000000, ?, 1)
   `);
-  const insFb = db.prepare('INSERT INTO fallback_config (model_db_id, priority, enabled) VALUES (?, ?, 1)');
+  const insFb = db.prepare('INSERT INTO fallback_config (user_id, model_db_id, priority, enabled) VALUES (?, ?, ?, 1)');
   const insHist = db.prepare(`
-    INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
-    VALUES (?, ?, 1, ?, 0, ?, ?, ?, ?)
+    INSERT INTO requests (user_id, platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
+    VALUES (?, ?, ?, 1, ?, 0, ?, ?, ?, ?)
   `);
 
   PROFILES.forEach((p, i) => {
     insModel.run(p.platform, p.modelId, p.name, p.intelligenceRank, p.sizeLabel, p.budget);
     const id = (db.prepare('SELECT id FROM models WHERE platform=? AND model_id=?').get(p.platform, p.modelId) as { id: number }).id;
-    insFb.run(id, i + 1);
+    insFb.run(SIM_USER, id, i + 1);
     const { encrypted, iv, authTag } = encrypt(`key-${p.platform}`);
-    db.prepare(`INSERT INTO api_keys (platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (?, 'sim', ?, ?, ?, 'healthy', 1)`)
-      .run(p.platform, encrypted, iv, authTag);
-    for (let s = 0; s < p.successes; s++) insHist.run(p.platform, p.modelId, 'success', p.outTokens, p.latencyMs, null, p.ttfbMs);
-    for (let f = 0; f < p.failures; f++) insHist.run(p.platform, p.modelId, 'error', 0, p.latencyMs, 'sim-fail', p.ttfbMs);
+    db.prepare(`INSERT INTO api_keys (user_id, platform, label, encrypted_key, iv, auth_tag, status, enabled) VALUES (?, ?, 'sim', ?, ?, ?, 'healthy', 1)`)
+      .run(SIM_USER, p.platform, encrypted, iv, authTag);
+    for (let s = 0; s < p.successes; s++) insHist.run(SIM_USER, p.platform, p.modelId, 'success', p.outTokens, p.latencyMs, null, p.ttfbMs);
+    for (let f = 0; f < p.failures; f++) insHist.run(SIM_USER, p.platform, p.modelId, 'error', 0, p.latencyMs, 'sim-fail', p.ttfbMs);
   });
 }
 
 function distribution(runs: number): Map<string, number> {
   const counts = new Map<string, number>();
   for (let i = 0; i < runs; i++) {
-    const r = routeRequest(100);
+    const r = routeRequest(SIM_USER, 100);
     counts.set(r.displayName, (counts.get(r.displayName) ?? 0) + 1);
   }
   return counts;
@@ -83,7 +86,7 @@ function printDistribution(title: string, counts: Map<string, number>, runs: num
 }
 
 function printScores() {
-  const { scores } = getRoutingScores();
+  const { scores } = getRoutingScores(SIM_USER);
   console.log('    model                  rel  spd  int  guard  score');
   for (const s of scores) {
     const guard = s.headroom * s.rateLimit;
@@ -115,8 +118,8 @@ function main() {
 
   const strategies: RoutingStrategy[] = ['priority', 'balanced', 'smartest', 'fastest', 'reliable'];
   for (const strat of strategies) {
-    setRoutingStrategy(strat);
-    refreshStatsCache(getDb(), true);
+    setRoutingStrategy(SIM_USER, strat);
+    refreshStatsCache(getDb(), SIM_USER, true);
     if (strat === 'balanced') { console.log('\n  ── balanced score breakdown ──'); printScores(); }
     printDistribution(`Strategy: ${strat.toUpperCase()}`, distribution(RUNS), RUNS);
   }
@@ -125,8 +128,8 @@ function main() {
   console.log('\n══════════════════════════════════════════════════════════════');
   console.log('  ADAPTATION  —  inject a failure burst into the top model');
   console.log('══════════════════════════════════════════════════════════════');
-  setRoutingStrategy('balanced');
-  refreshStatsCache(getDb(), true);
+  setRoutingStrategy(SIM_USER, 'balanced');
+  refreshStatsCache(getDb(), SIM_USER, true);
   const before = distribution(RUNS);
   printDistribution('Before (balanced, steady state)', before, RUNS);
 
@@ -135,12 +138,12 @@ function main() {
   const favProfile = PROFILES.find(p => p.name === fav)!;
   const db = getDb();
   const insHist = db.prepare(`
-    INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
-    VALUES (?, ?, 1, 'error', 0, 0, 1000, 'outage', NULL)
+    INSERT INTO requests (user_id, platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, ttfb_ms)
+    VALUES (?, ?, ?, 1, 'error', 0, 0, 1000, 'outage', NULL)
   `);
-  for (let i = 0; i < 300; i++) insHist.run(favProfile.platform, favProfile.modelId);
+  for (let i = 0; i < 300; i++) insHist.run(SIM_USER, favProfile.platform, favProfile.modelId);
   console.log(`\n  → Injected 300 fresh failures into "${fav}" (simulated outage)…`);
-  refreshStatsCache(getDb(), true);
+  refreshStatsCache(getDb(), SIM_USER, true);
   printScores();
   printDistribution('After (balanced, post-outage)', distribution(RUNS), RUNS);
   console.log('');

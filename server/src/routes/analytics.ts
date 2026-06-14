@@ -5,6 +5,10 @@ import { FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M } from '../db/model-pricing
 
 export const analyticsRouter = Router();
 
+// Owning user (set by requireAuth). Analytics only ever reflect this user's
+// own request history.
+const uid = (req: Request): number => (req as Request & { user: { userId: number } }).user.userId;
+
 // Format UTC timestamps the same way SQLite stores created_at text values.
 const toSqliteDateTime = (timestamp: number) =>
     new Date(timestamp).toISOString().slice(0, 19).replace('T', ' ');
@@ -51,8 +55,8 @@ analyticsRouter.get('/summary', (req: Request, res: Response) => {
       ELSE 0 END) as est_savings
     FROM requests r
     LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
-    WHERE r.created_at >= ?
-  `).get(FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since) as any;
+    WHERE r.created_at >= ? AND r.user_id = ?
+  `).get(FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since, uid(req)) as any;
 
   const totalRequests = stats.total_requests ?? 0;
   const successRate = totalRequests > 0 ? (stats.success_count / totalRequests) * 100 : 0;
@@ -98,10 +102,10 @@ analyticsRouter.get('/by-model', (req: Request, res: Response) => {
       ELSE 0 END) as est_cost
     FROM requests r
     LEFT JOIN models m ON m.platform = r.platform AND m.model_id = r.model_id
-    WHERE r.created_at >= ?
+    WHERE r.created_at >= ? AND r.user_id = ?
     GROUP BY r.platform, r.model_id
     ORDER BY requests DESC
-  `).all(FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since) as any[];
+  `).all(FALLBACK_INPUT_PER_M, FALLBACK_OUTPUT_PER_M, since, uid(req)) as any[];
 
   res.json(rows.map(r => ({
     platform: r.platform,
@@ -133,10 +137,10 @@ analyticsRouter.get('/by-platform', (req: Request, res: Response) => {
       SUM(input_tokens) as total_input_tokens,
       SUM(output_tokens) as total_output_tokens
     FROM requests
-    WHERE created_at >= ?
+    WHERE created_at >= ? AND user_id = ?
     GROUP BY platform
     ORDER BY requests DESC
-  `).all(since) as any[];
+  `).all(since, uid(req)) as any[];
 
   res.json(rows.map(r => ({
     platform: r.platform,
@@ -165,10 +169,10 @@ analyticsRouter.get('/timeline', (req: Request, res: Response) => {
       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as failure_count
     FROM requests
-    WHERE created_at >= ?
+    WHERE created_at >= ? AND user_id = ?
     GROUP BY strftime('${dateFormat}', created_at)
     ORDER BY timestamp ASC
-  `).all(since) as any[];
+  `).all(since, uid(req)) as any[];
 
   res.json(rows.map(r => ({
     timestamp: r.timestamp,
@@ -201,10 +205,10 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
       END as error_category,
       COUNT(*) as count
     FROM requests
-    WHERE status = 'error' AND created_at >= ?
+    WHERE status = 'error' AND created_at >= ? AND user_id = ?
     GROUP BY platform, error_category
     ORDER BY count DESC
-  `).all(since) as any[];
+  `).all(since, uid(req)) as any[];
 
   // Also get totals by category
   const byCategory = db.prepare(`
@@ -221,19 +225,19 @@ analyticsRouter.get('/error-distribution', (req: Request, res: Response) => {
       END as category,
       COUNT(*) as count
     FROM requests
-    WHERE status = 'error' AND created_at >= ?
+    WHERE status = 'error' AND created_at >= ? AND user_id = ?
     GROUP BY category
     ORDER BY count DESC
-  `).all(since) as any[];
+  `).all(since, uid(req)) as any[];
 
   // Errors by platform
   const byPlatform = db.prepare(`
     SELECT platform, COUNT(*) as count
     FROM requests
-    WHERE status = 'error' AND created_at >= ?
+    WHERE status = 'error' AND created_at >= ? AND user_id = ?
     GROUP BY platform
     ORDER BY count DESC
-  `).all(since) as any[];
+  `).all(since, uid(req)) as any[];
 
   res.json({
     byCategory,
@@ -251,10 +255,10 @@ analyticsRouter.get('/errors', (req: Request, res: Response) => {
   const rows = db.prepare(`
     SELECT id, platform, model_id, error, latency_ms, created_at
     FROM requests
-    WHERE status = 'error' AND created_at >= ?
+    WHERE status = 'error' AND created_at >= ? AND user_id = ?
     ORDER BY created_at DESC
     LIMIT 50
-  `).all(since) as any[];
+  `).all(since, uid(req)) as any[];
 
   res.json(rows.map(r => ({
     id: r.id,

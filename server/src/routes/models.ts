@@ -5,23 +5,26 @@ import { hasProvider } from '../providers/index.js';
 
 export const modelsRouter = Router();
 
-// List all models with availability info
-modelsRouter.get('/', (_req: Request, res: Response) => {
+const uid = (req: Request): number => (req as Request & { user: { userId: number } }).user.userId;
+
+// List all catalog models with this user's availability info
+modelsRouter.get('/', (req: Request, res: Response) => {
+  const userId = uid(req);
   const db = getDb();
   const models = db.prepare(`
     SELECT m.*, fc.priority, fc.enabled as fallback_enabled
     FROM models m
-    LEFT JOIN fallback_config fc ON fc.model_db_id = m.id
+    LEFT JOIN fallback_config fc ON fc.model_db_id = m.id AND fc.user_id = ?
     ORDER BY COALESCE(fc.priority, m.intelligence_rank) ASC
-  `).all() as any[];
+  `).all(userId) as any[];
 
-  // Count keys per platform
+  // Count this user's enabled keys per platform
   const keyCounts = db.prepare(`
     SELECT platform, COUNT(*) as count
     FROM api_keys
-    WHERE enabled = 1
+    WHERE enabled = 1 AND user_id = ?
     GROUP BY platform
-  `).all() as { platform: string; count: number }[];
+  `).all(userId) as { platform: string; count: number }[];
 
   const keyCountMap = new Map(keyCounts.map(k => [k.platform, k.count]));
 

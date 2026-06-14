@@ -21,6 +21,21 @@ function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+function newApiKey(): string {
+  return `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
+}
+
+// Seed a fresh account's per-user fallback chain from the global model catalog
+// (every enabled model, smartest first). Without this a new user's chain is
+// empty and nothing would route even after they add a provider key. (#multi-tenant)
+function seedFallbackChainForUser(db: ReturnType<typeof getDb>, userId: number): void {
+  db.prepare(`
+    INSERT OR IGNORE INTO fallback_config (user_id, model_db_id, priority, enabled)
+    SELECT ?, id, ROW_NUMBER() OVER (ORDER BY intelligence_rank ASC, id ASC), 1
+    FROM models WHERE enabled = 1
+  `).run(userId);
+}
+
 export function userCount(): number {
   const row = getDb().prepare('SELECT COUNT(*) AS c FROM users').get() as { c: number };
   return row.c;
@@ -36,9 +51,12 @@ export function createUser(email: string, password: string): SessionUser {
     err.code = 'email_taken';
     throw err;
   }
-  const result = db.prepare('INSERT INTO users (email, password_hash) VALUES (?, ?)')
-    .run(normalized, hashPassword(password));
-  return { userId: Number(result.lastInsertRowid), email: normalized };
+  const result = db.prepare('INSERT INTO users (email, password_hash, api_key) VALUES (?, ?, ?)')
+    .run(normalized, hashPassword(password), newApiKey());
+  const userId = Number(result.lastInsertRowid);
+  // Give the new account its own isolated fallback chain over the shared catalog.
+  seedFallbackChainForUser(db, userId);
+  return { userId, email: normalized };
 }
 
 /** Verify credentials. Returns the user on success, null on failure. */

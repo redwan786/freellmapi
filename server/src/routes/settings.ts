@@ -1,19 +1,20 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { getUnifiedApiKey, regenerateUnifiedKey, getSetting, setSetting } from '../db/index.js';
+import { getUserApiKey, regenerateUserApiKey, setSetting } from '../db/index.js';
 import { applyProxyUrl, applyProxyEnabled, applyProxyBypass, isProxyActive, getProxyUrl, isProxyEnabled, getProxyBypassPlatforms } from '../lib/proxy.js';
 
 export const settingsRouter = Router();
 
-// Get the unified API key
-settingsRouter.get('/api-key', (_req: Request, res: Response) => {
-  res.json({ apiKey: getUnifiedApiKey() });
+const uid = (req: Request): number => (req as Request & { user: { userId: number } }).user.userId;
+
+// Get this user's personal /v1 proxy key.
+settingsRouter.get('/api-key', (req: Request, res: Response) => {
+  res.json({ apiKey: getUserApiKey(uid(req)) });
 });
 
-// Regenerate the unified API key
-settingsRouter.post('/api-key/regenerate', (_req: Request, res: Response) => {
-  const newKey = regenerateUnifiedKey();
-  res.json({ apiKey: newKey });
+// Regenerate this user's personal /v1 proxy key.
+settingsRouter.post('/api-key/regenerate', (req: Request, res: Response) => {
+  res.json({ apiKey: regenerateUserApiKey(uid(req)) });
 });
 
 // Get the proxy settings

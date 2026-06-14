@@ -1,18 +1,22 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { z } from 'zod';
-import { getDb, setSetting } from '../db/index.js';
+import { getDb, setUserSetting } from '../db/index.js';
 import { listEmbeddingModels, getDefaultFamily, type EmbeddingModelRow } from '../services/embeddings.js';
 
 export const embeddingsRouter = Router();
 
+// Owning user (set by requireAuth).
+const uid = (req: Request): number => (req as Request & { user: { userId: number } }).user.userId;
+
 // Families with their provider chains, for the dashboard Embeddings tab.
-embeddingsRouter.get('/', (_req: Request, res: Response) => {
+embeddingsRouter.get('/', (req: Request, res: Response) => {
+  const userId = uid(req);
   const db = getDb();
   const keyCounts = new Map(
     (db.prepare(
-      "SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND status IN ('healthy', 'unknown') GROUP BY platform",
-    ).all() as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
+      "SELECT platform, COUNT(*) AS n FROM api_keys WHERE enabled = 1 AND user_id = ? AND status IN ('healthy', 'unknown') GROUP BY platform",
+    ).all(userId) as { platform: string; n: number }[]).map(r => [r.platform, r.n]),
   );
 
   const byFamily = new Map<string, EmbeddingModelRow[]>();
@@ -22,7 +26,7 @@ embeddingsRouter.get('/', (_req: Request, res: Response) => {
     byFamily.set(row.family, list);
   }
 
-  const defaultFamily = getDefaultFamily();
+  const defaultFamily = getDefaultFamily(userId);
   res.json({
     defaultFamily,
     families: [...byFamily.entries()].map(([family, rows]) => ({
@@ -54,6 +58,7 @@ const updateSchema = z.object({
 });
 
 embeddingsRouter.put('/', (req: Request, res: Response) => {
+  const userId = uid(req);
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: 'Invalid request body' } });
@@ -67,7 +72,7 @@ embeddingsRouter.put('/', (req: Request, res: Response) => {
       res.status(400).json({ error: { message: `Unknown family '${parsed.data.defaultFamily}'` } });
       return;
     }
-    setSetting('embeddings_default_family', parsed.data.defaultFamily);
+    setUserSetting(userId, 'embeddings_default_family', parsed.data.defaultFamily);
   }
 
   if (parsed.data.providers) {
@@ -83,7 +88,8 @@ embeddingsRouter.put('/', (req: Request, res: Response) => {
 
 // Per-family usage: requests today (most embedding quotas are daily/RPM) and
 // tokens this calendar month, from the tagged request log.
-embeddingsRouter.get('/usage', (_req: Request, res: Response) => {
+embeddingsRouter.get('/usage', (req: Request, res: Response) => {
+  const userId = uid(req);
   const db = getDb();
   const usage = db.prepare(`
     SELECT em.family,
@@ -95,6 +101,7 @@ embeddingsRouter.get('/usage', (_req: Request, res: Response) => {
      AND r.status = 'success'
      AND r.platform = em.platform
      AND r.model_id = em.model_id
+     AND r.user_id = ${userId}
      AND r.created_at >= datetime('now', 'start of month')
     GROUP BY em.family
   `).all() as { family: string; requests_today: number; tokens_month: number }[];

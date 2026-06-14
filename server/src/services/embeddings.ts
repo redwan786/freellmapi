@@ -7,7 +7,7 @@
 // `model: "auto"` (or empty) routes to the configured default family — so auto
 // always works: with one provider it just uses that one, with several it gets
 // cross-provider redundancy for free.
-import { getDb, getSetting } from '../db/index.js';
+import { getDb, getUserSetting } from '../db/index.js';
 import { decrypt } from '../lib/crypto.js';
 import { proxyFetch } from '../lib/proxy.js';
 
@@ -47,24 +47,24 @@ export function listEmbeddingModels(): EmbeddingModelRow[] {
   ).all() as EmbeddingModelRow[];
 }
 
-export function getDefaultFamily(): string {
-  return getSetting('embeddings_default_family') ?? 'gemini-embedding-001';
+export function getDefaultFamily(userId: number): string {
+  return getUserSetting(userId, 'embeddings_default_family') ?? 'gemini-embedding-001';
 }
 
 /** Map the request's `model` to a family: 'auto'/empty → default; a family
  * name → itself; a provider-specific model id → its family. */
-export function resolveFamily(model: string | undefined): string | null {
-  if (!model || model === 'auto') return getDefaultFamily();
+export function resolveFamily(userId: number, model: string | undefined): string | null {
+  if (!model || model === 'auto') return getDefaultFamily(userId);
   const rows = listEmbeddingModels();
   if (rows.some(r => r.family === model)) return model;
   const byModelId = rows.find(r => r.model_id === model);
   return byModelId?.family ?? null;
 }
 
-function getPlatformKey(platform: string): string | null {
+function getPlatformKey(userId: number, platform: string): string | null {
   const row = getDb().prepare(
-    "SELECT encrypted_key, iv, auth_tag FROM api_keys WHERE platform = ? AND enabled = 1 AND status IN ('healthy', 'unknown') ORDER BY id LIMIT 1",
-  ).get(platform) as { encrypted_key: string; iv: string; auth_tag: string } | undefined;
+    "SELECT encrypted_key, iv, auth_tag FROM api_keys WHERE platform = ? AND user_id = ? AND enabled = 1 AND status IN ('healthy', 'unknown') ORDER BY id LIMIT 1",
+  ).get(platform, userId) as { encrypted_key: string; iv: string; auth_tag: string } | undefined;
   if (!row) return null;
   try {
     return decrypt(row.encrypted_key, row.iv, row.auth_tag);
@@ -173,6 +173,7 @@ async function callProvider(row: EmbeddingModelRow, key: string, inputs: string[
 }
 
 function logEmbeddingRequest(
+  userId: number,
   row: EmbeddingModelRow,
   status: 'success' | 'error',
   inputTokens: number,
@@ -181,9 +182,9 @@ function logEmbeddingRequest(
 ): void {
   try {
     getDb().prepare(`
-      INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type)
-      VALUES (?, ?, NULL, ?, ?, 0, ?, ?, 'embedding')
-    `).run(row.platform, row.model_id, status, inputTokens, latencyMs, error);
+      INSERT INTO requests (user_id, platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type)
+      VALUES (?, ?, ?, NULL, ?, ?, 0, ?, ?, 'embedding')
+    `).run(userId, row.platform, row.model_id, status, inputTokens, latencyMs, error);
   } catch (e) {
     console.error('Failed to log embedding request:', e);
   }
@@ -191,8 +192,8 @@ function logEmbeddingRequest(
 
 /** Embed `inputs` via the family's provider chain, failing over within the
  * family on any provider error. Throws EmbeddingsError when the chain is dry. */
-export async function runEmbeddings(model: string | undefined, inputs: string[]): Promise<EmbeddingsResult> {
-  const family = resolveFamily(model);
+export async function runEmbeddings(userId: number, model: string | undefined, inputs: string[]): Promise<EmbeddingsResult> {
+  const family = resolveFamily(userId, model);
   if (!family) {
     throw new EmbeddingsError(
       `Unknown embedding model '${model}'. Use 'auto', a family name, or a provider model id.`, 400,
@@ -208,7 +209,7 @@ export async function runEmbeddings(model: string | undefined, inputs: string[])
 
   let lastError: EmbeddingsError | null = null;
   for (const row of chain) {
-    const key = getPlatformKey(row.platform);
+    const key = getPlatformKey(userId, row.platform);
     if (!key) continue; // no usable key for this provider — try the next one
     const started = Date.now();
     try {
@@ -217,7 +218,7 @@ export async function runEmbeddings(model: string | undefined, inputs: string[])
         throw new EmbeddingsError('upstream returned malformed embeddings', 502);
       }
       const tokens = out.inputTokens ?? estimateTokens(inputs);
-      logEmbeddingRequest(row, 'success', tokens, Date.now() - started, null);
+      logEmbeddingRequest(userId, row, 'success', tokens, Date.now() - started, null);
       return {
         family,
         platform: row.platform,
@@ -228,7 +229,7 @@ export async function runEmbeddings(model: string | undefined, inputs: string[])
       };
     } catch (err: any) {
       const e = err instanceof EmbeddingsError ? err : new EmbeddingsError(String(err?.message ?? err), 502);
-      logEmbeddingRequest(row, 'error', 0, Date.now() - started, e.message.slice(0, 300));
+      logEmbeddingRequest(userId, row, 'error', 0, Date.now() - started, e.message.slice(0, 300));
       lastError = e;
       // fall through to the next provider in the family
     }

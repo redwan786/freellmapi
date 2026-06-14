@@ -8,12 +8,16 @@ import { parseBudget } from '../lib/budget.js';
 
 export const fallbackRouter = Router();
 
+// The owning user, set by requireAuth (this router is mounted behind it).
+const uid = (req: Request): number => (req as Request & { user: { userId: number } }).user.userId;
+
 // ── Bandit routing strategy ─────────────────────────────────────────────────
 // GET  /routing → active strategy, preset weights, the saved custom weights,
 //                 and the per-model score breakdown (reliability / speed /
 //                 intelligence + guardrails).
-fallbackRouter.get('/routing', (_req: Request, res: Response) => {
-  res.json({ ...getRoutingScores(), customWeights: getCustomWeights() });
+fallbackRouter.get('/routing', (req: Request, res: Response) => {
+  const userId = uid(req);
+  res.json({ ...getRoutingScores(userId), customWeights: getCustomWeights(userId) });
 });
 
 const routingSchema = z.object({
@@ -33,20 +37,22 @@ const routingSchema = z.object({
 // axes; 'custom' uses the user-saved vector; 'priority' falls back to the legacy
 // manual chain order.
 fallbackRouter.put('/routing', (req: Request, res: Response) => {
+  const userId = uid(req);
   const parsed = routingSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
     return;
   }
   if (parsed.data.strategy === 'custom' && parsed.data.weights) {
-    setCustomWeights(parsed.data.weights);
+    setCustomWeights(userId, parsed.data.weights);
   }
-  setRoutingStrategy(parsed.data.strategy as RoutingStrategy);
-  res.json({ strategy: getRoutingStrategy(), presets: BANDIT_PRESETS, customWeights: getCustomWeights() });
+  setRoutingStrategy(userId, parsed.data.strategy as RoutingStrategy);
+  res.json({ strategy: getRoutingStrategy(userId), presets: BANDIT_PRESETS, customWeights: getCustomWeights(userId) });
 });
 
 // Get fallback chain (with dynamic penalties)
-fallbackRouter.get('/', (_req: Request, res: Response) => {
+fallbackRouter.get('/', (req: Request, res: Response) => {
+  const userId = uid(req);
   const db = getDb();
   const rows = db.prepare(`
     SELECT fc.model_db_id, fc.priority, fc.enabled,
@@ -55,19 +61,20 @@ fallbackRouter.get('/', (_req: Request, res: Response) => {
            m.monthly_token_budget, m.supports_vision, m.supports_tools
     FROM fallback_config fc
     JOIN models m ON m.id = fc.model_db_id
+    WHERE fc.user_id = ?
     ORDER BY fc.priority ASC
-  `).all() as any[];
+  `).all(userId) as any[];
 
-  // Count enabled keys per platform
+  // Count this user's enabled keys per platform
   const keyCounts = db.prepare(`
     SELECT platform, COUNT(*) as count
-    FROM api_keys WHERE enabled = 1
+    FROM api_keys WHERE enabled = 1 AND user_id = ?
     GROUP BY platform
-  `).all() as { platform: string; count: number }[];
+  `).all(userId) as { platform: string; count: number }[];
   const keyCountMap = new Map(keyCounts.map(k => [k.platform, k.count]));
 
   // Get current dynamic penalties
-  const penalties = getAllPenalties();
+  const penalties = getAllPenalties(userId);
   const penaltyMap = new Map(penalties.map(p => [p.modelDbId, p]));
 
   res.json(rows.map(r => {
@@ -103,6 +110,7 @@ const updateSchema = z.array(z.object({
 
 // Update fallback chain (full replace)
 fallbackRouter.put('/', (req: Request, res: Response) => {
+  const userId = uid(req);
   const parsed = updateSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
@@ -111,12 +119,12 @@ fallbackRouter.put('/', (req: Request, res: Response) => {
 
   const db = getDb();
   const update = db.prepare(`
-    UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ?
+    UPDATE fallback_config SET priority = ?, enabled = ? WHERE model_db_id = ? AND user_id = ?
   `);
 
   const updateAll = db.transaction(() => {
     for (const entry of parsed.data) {
-      update.run(entry.priority, entry.enabled ? 1 : 0, entry.modelDbId);
+      update.run(entry.priority, entry.enabled ? 1 : 0, entry.modelDbId, userId);
     }
   });
   updateAll();
@@ -141,6 +149,7 @@ const SORT_PRESETS: Record<string, string> = {
 };
 
 fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
+  const userId = uid(req);
   const preset = String(req.params.preset);
   const orderBy = SORT_PRESETS[preset];
   if (!orderBy) {
@@ -151,10 +160,10 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
   const db = getDb();
   const models = db.prepare(`SELECT m.id FROM models m ORDER BY ${orderBy}`).all() as { id: number }[];
 
-  const update = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ?');
+  const update = db.prepare('UPDATE fallback_config SET priority = ? WHERE model_db_id = ? AND user_id = ?');
   const reorder = db.transaction(() => {
     for (let i = 0; i < models.length; i++) {
-      update.run(i + 1, models[i].id);
+      update.run(i + 1, models[i].id, userId);
     }
   });
   reorder();
@@ -163,26 +172,27 @@ fallbackRouter.post('/sort/:preset', (req: Request, res: Response) => {
 });
 
 // Token usage per model for the stacked bar
-fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
+fallbackRouter.get('/token-usage', (req: Request, res: Response) => {
+  const userId = uid(req);
   const db = getDb();
 
-  // Get platforms that have enabled keys
+  // Get platforms that have this user's enabled keys
   const platforms = db.prepare(`
     SELECT DISTINCT ak.platform
     FROM api_keys ak
-    WHERE ak.enabled = 1
-  `).all() as { platform: string }[];
+    WHERE ak.enabled = 1 AND ak.user_id = ?
+  `).all(userId) as { platform: string }[];
   const platformSet = new Set(platforms.map(p => p.platform));
 
-  // Get monthly budget per model, ordered by fallback priority
+  // Get monthly budget per model, ordered by this user's fallback priority
   const models = db.prepare(`
     SELECT m.platform, m.model_id, m.display_name, m.monthly_token_budget,
            fc.priority
     FROM models m
     JOIN fallback_config fc ON fc.model_db_id = m.id
-    WHERE m.enabled = 1
+    WHERE m.enabled = 1 AND fc.user_id = ?
     ORDER BY fc.priority ASC
-  `).all() as { platform: string; model_id: string; display_name: string; monthly_token_budget: string; priority: number }[];
+  `).all(userId) as { platform: string; model_id: string; display_name: string; monthly_token_budget: string; priority: number }[];
 
   // Build per-model breakdown (only platforms with keys)
   const modelBudgets = models
@@ -195,14 +205,14 @@ fallbackRouter.get('/token-usage', (_req: Request, res: Response) => {
 
   const totalBudget = modelBudgets.reduce((s, m) => s + m.budget, 0);
 
-  // Tokens used this month
+  // Tokens this user used this month
   const usage = db.prepare(`
     SELECT
       COALESCE(SUM(input_tokens + output_tokens), 0) as total_used
     FROM requests
     WHERE created_at >= datetime('now', 'start of month')
-      AND request_type = 'chat'
-  `).get() as { total_used: number };
+      AND user_id = ?
+  `).get(userId) as { total_used: number };
 
   res.json({
     totalBudget,

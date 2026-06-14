@@ -46,6 +46,7 @@ export function migrateDbSchema(db: Database.Database) {
   migrateEmbeddingsV1(db);
   migrateQuirksV1(db);
   ensureUnifiedKey(db);
+  migrateMultiTenantV1(db);
 }
 
 function createTables(db: Database.Database) {
@@ -2140,5 +2141,96 @@ function ensureUnifiedKey(db: Database.Database) {
     const key = `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
     db.prepare("INSERT INTO settings (key, value) VALUES ('unified_api_key', ?)").run(key);
     console.log(`\n  Your unified API key: ${key}\n`);
+  }
+}
+
+// ── Multi-tenant V1 ─────────────────────────────────────────────────────────
+// Converts the single-user model into per-user isolation. Each user owns their
+// own provider keys, request history, fallback chain, and per-user settings,
+// and carries a personal /v1 proxy api_key. Existing single-user data is
+// backfilled to the oldest account, which inherits the legacy global
+// unified_api_key so any client already pointed at the proxy keeps working.
+// Idempotent: every step checks before it mutates.
+function newApiKey(): string {
+  return `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
+}
+
+function migrateMultiTenantV1(db: Database.Database) {
+  // 1. users.api_key — each user's personal /v1 proxy key (unique).
+  const userCols = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
+  if (!userCols.some(c => c.name === 'api_key')) {
+    db.prepare('ALTER TABLE users ADD COLUMN api_key TEXT').run();
+    db.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_api_key ON users(api_key)').run();
+  }
+
+  // 2. user_id ownership on the per-user tables. rate_limit_usage/cooldowns are
+  //    intentionally NOT scoped here — they key on key_id, and a key already
+  //    belongs to exactly one user, so they isolate transitively.
+  for (const table of ['api_keys', 'requests']) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!cols.some(c => c.name === 'user_id')) {
+      db.prepare(`ALTER TABLE ${table} ADD COLUMN user_id INTEGER`).run();
+    }
+  }
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id)').run();
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_requests_user ON requests(user_id)').run();
+
+  // 3. fallback_config: the chain is now per-user, so the uniqueness must be
+  //    (user_id, model_db_id). SQLite can't alter a constraint, so recreate.
+  const fcCols = db.prepare('PRAGMA table_info(fallback_config)').all() as { name: string }[];
+  if (!fcCols.some(c => c.name === 'user_id')) {
+    db.exec(`
+      CREATE TABLE fallback_config_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        model_db_id INTEGER NOT NULL REFERENCES models(id),
+        priority INTEGER NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(user_id, model_db_id)
+      );
+      INSERT INTO fallback_config_new (id, user_id, model_db_id, priority, enabled)
+        SELECT id, NULL, model_db_id, priority, enabled FROM fallback_config;
+      DROP TABLE fallback_config;
+      ALTER TABLE fallback_config_new RENAME TO fallback_config;
+      CREATE INDEX IF NOT EXISTS idx_fallback_user ON fallback_config(user_id);
+    `);
+  }
+
+  // 4. user_settings: per-user key/value (routing strategy, custom weights,
+  //    default embedding family). Global infra settings stay in `settings`.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_settings (
+      user_id INTEGER NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      PRIMARY KEY (user_id, key)
+    );
+  `);
+
+  // 5. Backfill existing single-user data to the oldest account.
+  const firstUser = db.prepare('SELECT id, api_key FROM users ORDER BY id LIMIT 1').get() as { id: number; api_key: string | null } | undefined;
+  if (firstUser) {
+    const uid = firstUser.id;
+    db.prepare('UPDATE api_keys SET user_id = ? WHERE user_id IS NULL').run(uid);
+    db.prepare('UPDATE requests SET user_id = ? WHERE user_id IS NULL').run(uid);
+    db.prepare('UPDATE fallback_config SET user_id = ? WHERE user_id IS NULL').run(uid);
+
+    // The legacy global unified key becomes this user's personal key.
+    if (!firstUser.api_key) {
+      const legacy = db.prepare("SELECT value FROM settings WHERE key = 'unified_api_key'").get() as { value: string } | undefined;
+      db.prepare('UPDATE users SET api_key = ? WHERE id = ?').run(legacy?.value ?? newApiKey(), uid);
+    }
+
+    // Lift the previously-global per-user settings into this user's namespace.
+    for (const k of ['routing_strategy', 'routing_custom_weights', 'embeddings_default_family']) {
+      const g = db.prepare('SELECT value FROM settings WHERE key = ?').get(k) as { value: string } | undefined;
+      if (g) db.prepare('INSERT OR IGNORE INTO user_settings (user_id, key, value) VALUES (?, ?, ?)').run(uid, k, g.value);
+    }
+  }
+
+  // 6. Any account still missing a personal key gets one.
+  const keyless = db.prepare('SELECT id FROM users WHERE api_key IS NULL').all() as { id: number }[];
+  for (const row of keyless) {
+    db.prepare('UPDATE users SET api_key = ? WHERE id = ?').run(newApiKey(), row.id);
   }
 }

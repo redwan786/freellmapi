@@ -65,3 +65,44 @@ export function setSetting(key: string, value: string): void {
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `).run(key, value);
 }
+
+// ── Per-user accessors (multi-tenant) ───────────────────────────────────────
+
+// Resolve an incoming /v1 proxy api_key to its owning user id, or undefined if
+// no account carries that key. Indexed unique lookup (idx_users_api_key).
+export function resolveUserIdByApiKey(token: string | undefined | null): number | undefined {
+  if (!token) return undefined;
+  const db = getDb();
+  const row = db.prepare('SELECT id FROM users WHERE api_key = ?').get(token) as { id: number } | undefined;
+  return row?.id;
+}
+
+// The personal /v1 proxy key for a user (shown in the dashboard).
+export function getUserApiKey(userId: number): string {
+  const db = getDb();
+  const row = db.prepare('SELECT api_key FROM users WHERE id = ?').get(userId) as { api_key: string | null } | undefined;
+  return row?.api_key ?? '';
+}
+
+export function regenerateUserApiKey(userId: number): string {
+  const db = getDb();
+  const key = `freellmapi-${crypto.randomBytes(24).toString('hex')}`;
+  db.prepare('UPDATE users SET api_key = ? WHERE id = ?').run(key, userId);
+  return key;
+}
+
+// Per-user key/value settings (routing strategy, custom weights, default
+// embedding family). Falls back to undefined; callers supply their own default.
+export function getUserSetting(userId: number, key: string): string | undefined {
+  const db = getDb();
+  const row = db.prepare('SELECT value FROM user_settings WHERE user_id = ? AND key = ?').get(userId, key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setUserSetting(userId: number, key: string, value: string): void {
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO user_settings (user_id, key, value) VALUES (?, ?, ?)
+    ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value
+  `).run(userId, key, value);
+}

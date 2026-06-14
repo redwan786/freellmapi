@@ -78,6 +78,28 @@ authRouter.post('/setup', (req: Request, res: Response) => {
   res.status(201).json({ token, email: user.email });
 });
 
+// Open sign-up — anyone can create their own isolated account (their own
+// provider keys, /v1 key, fallback chain, analytics). Unlike /setup this is
+// allowed regardless of how many users exist.
+authRouter.post('/signup', (req: Request, res: Response) => {
+  const parsed = credentialsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: parsed.error.errors.map(e => e.message).join(', ') } });
+    return;
+  }
+  try {
+    const user = createUser(parsed.data.email, parsed.data.password);
+    const token = createSession(user.userId);
+    res.status(201).json({ token, email: user.email });
+  } catch (err: any) {
+    if (err?.code === 'email_taken') {
+      res.status(409).json({ error: { message: 'An account with that email already exists', type: 'email_taken' } });
+      return;
+    }
+    throw err;
+  }
+});
+
 authRouter.post('/login', (req: Request, res: Response) => {
   const parsed = credentialsSchema.safeParse(req.body);
   if (!parsed.success) {
