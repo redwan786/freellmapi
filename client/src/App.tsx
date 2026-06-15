@@ -6,7 +6,7 @@ import {
   Database, Sparkles, LogOut, ChevronDown,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { Button, buttonVariants } from '@/components/ui/button'
+import { buttonVariants } from '@/components/ui/button'
 import {
   DropdownMenu,
   DropdownMenuContent,
