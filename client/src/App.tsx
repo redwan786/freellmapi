@@ -73,18 +73,6 @@ function useDarkMode() {
   return { dark, toggle }
 }
 
-function DarkModeToggle({ dark, onToggle }: { dark: boolean; onToggle: () => void }) {
-  return (
-    <Button
-      variant="ghost"
-      size="sm"
-      onClick={onToggle}
-      aria-label={dark ? 'Switch to light theme' : 'Switch to dark theme'}
-    >
-      {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-    </Button>
-  )
-}
 
 function Brand() {
   return (
@@ -115,7 +103,7 @@ function UserMenu({ dark, onToggle }: { dark: boolean; onToggle: () => void }) {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
+      <DropdownMenuTrigger asChild={true}>
         <Button variant="ghost" size="sm" className="gap-1.5 px-2">
           <span className="flex size-6 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground">
             {initials}
