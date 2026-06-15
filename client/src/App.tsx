@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, NavLink, Link, useLocation, useNavigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { Menu, Moon, Sun } from 'lucide-react'
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
+import {
+  Menu, Moon, Sun, Bot, FlaskConical, KeyRound, BarChart2,
+  Database, Sparkles, LogOut, ChevronDown,
+} from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import { Button, buttonVariants } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -12,7 +16,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { AuthGate } from '@/components/auth-gate'
-import { logout } from '@/lib/api'
+import { logout, apiFetch } from '@/lib/api'
 import KeysPage from '@/pages/KeysPage'
 import PlaygroundPage from '@/pages/PlaygroundPage'
 import FallbackPage from '@/pages/FallbackPage'
@@ -23,36 +27,34 @@ import DatabasePage from '@/pages/DatabasePage'
 
 const queryClient = new QueryClient()
 
-const navItems = [
-  { to: '/models', label: 'Models' },
-  { to: '/playground', label: 'Playground' },
-  { to: '/keys', label: 'Keys' },
-  { to: '/analytics', label: 'Analytics' },
-  { to: '/database', label: 'Database' },
-  { to: '/premium', label: 'Premium' },
+const navItems: { to: string; label: string; icon: LucideIcon }[] = [
+  { to: '/models',     label: 'Models',      icon: Bot },
+  { to: '/playground', label: 'Playground',  icon: FlaskConical },
+  { to: '/keys',       label: 'Keys',        icon: KeyRound },
+  { to: '/analytics',  label: 'Analytics',   icon: BarChart2 },
+  { to: '/database',   label: 'Database',    icon: Database },
+  { to: '/premium',    label: 'Premium',     icon: Sparkles },
 ]
 
 function getPreferredDarkMode() {
-  if (typeof window === 'undefined') {
-    return false
-  }
-
+  if (typeof window === 'undefined') return false
   const stored = localStorage.getItem('theme')
   return stored === 'dark' || (!stored && window.matchMedia('(prefers-color-scheme: dark)').matches)
 }
 
-function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
+function NavItem({ to, icon: Icon, children }: { to: string; icon: LucideIcon; children: React.ReactNode }) {
   return (
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `relative text-sm px-1 py-4 transition-colors ${
+        `relative flex items-center gap-1.5 text-sm px-1 py-4 transition-colors ${
           isActive
-            ? 'text-foreground after:absolute after:inset-x-0 after:-bottom-px after:h-px after:bg-foreground'
+            ? 'text-foreground after:absolute after:inset-x-0 after:-bottom-px after:h-[2px] after:bg-foreground after:rounded-full'
             : 'text-muted-foreground hover:text-foreground'
         }`
       }
     >
+      <Icon className="size-3.5 shrink-0" />
       {children}
     </NavLink>
   )
@@ -60,11 +62,9 @@ function NavItem({ to, children }: { to: string; children: React.ReactNode }) {
 
 function useDarkMode() {
   const [dark, setDark] = useState(getPreferredDarkMode)
-
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
   }, [dark])
-
   function toggle() {
     setDark((current) => {
       const next = !current
@@ -72,7 +72,6 @@ function useDarkMode() {
       return next
     })
   }
-
   return { dark, toggle }
 }
 
@@ -84,7 +83,7 @@ function DarkModeToggle({ dark, onToggle }: { dark: boolean; onToggle: () => voi
       onClick={onToggle}
       aria-label={dark ? 'Switch to light theme' : 'Switch to dark theme'}
     >
-      {dark ? <Sun /> : <Moon />}
+      {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
     </Button>
   )
 }
@@ -92,23 +91,71 @@ function DarkModeToggle({ dark, onToggle }: { dark: boolean; onToggle: () => voi
 function Brand() {
   return (
     <Link to="/" className="flex items-center gap-2 transition-opacity hover:opacity-70">
-      <span className="inline-block size-2 rounded-full bg-foreground" />
+      <div className="flex size-5 items-center justify-center rounded-md bg-foreground">
+        <Sparkles className="size-3 text-background" />
+      </div>
       <span className="font-semibold tracking-tight text-sm">FreeLLMAPI</span>
     </Link>
   )
 }
 
-// True when the dashboard runs inside the desktop shell (Electron preload
-// sets this). The navbar then doubles as the window title bar: draggable,
-// padded for the macOS traffic lights, and without the web-only Sign out.
 const isDesktopApp = typeof window !== 'undefined' && (window as any).__FREEAPI_DESKTOP__ === true
 
-// The preload's own early classList.add can be lost (it may run before this
-// document exists), so the client claims the class itself at module load —
-// before the first React paint — keeping html.desktop CSS (transparent body,
-// glass backdrop) reliable.
 if (isDesktopApp) {
   document.documentElement.classList.add('desktop')
+}
+
+function UserMenu({ dark, onToggle }: { dark: boolean; onToggle: () => void }) {
+  const { data } = useQuery<{ email: string }>({
+    queryKey: ['me'],
+    queryFn: () => apiFetch('/api/auth/me'),
+    retry: false,
+    staleTime: Infinity,
+  })
+
+  const initials = data?.email?.slice(0, 2).toUpperCase() ?? '…'
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" className="gap-1.5 px-2">
+          <span className="flex size-6 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground">
+            {initials}
+          </span>
+          <span className="hidden max-w-[120px] truncate text-xs text-muted-foreground lg:block">
+            {data?.email ?? ''}
+          </span>
+          <ChevronDown className="size-3 text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48">
+        {data?.email && (
+          <>
+            <div className="px-2 py-1.5 text-xs text-muted-foreground truncate">{data.email}</div>
+            <DropdownMenuSeparator />
+          </>
+        )}
+        <DropdownMenuGroup>
+          <DropdownMenuItem onClick={onToggle} className="justify-between text-sm">
+            <span>{dark ? 'Light mode' : 'Dark mode'}</span>
+            {dark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
+        {!isDesktopApp && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() => logout()}
+              className="text-sm text-destructive focus:text-destructive"
+            >
+              <LogOut className="size-3.5 mr-2" />
+              Sign out
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 }
 
 function Navbar() {
@@ -122,9 +169,7 @@ function Navbar() {
 
   return (
     <header
-      // In the desktop shell the body backdrop is already translucent glass;
-      // a lighter wash keeps the title bar from looking more solid than the page.
-      className={`sticky top-0 z-40 border-b backdrop-blur ${isDesktopApp ? 'bg-background/45' : 'bg-background/80'}`}
+      className={`sticky top-0 z-40 border-b backdrop-blur-md ${isDesktopApp ? 'bg-background/45' : 'bg-background/85'}`}
       style={isDesktopApp ? ({ WebkitAppRegion: 'drag' } as React.CSSProperties) : undefined}
     >
       <div
@@ -132,27 +177,28 @@ function Navbar() {
         style={isDesktopApp ? { minHeight: 52 } : undefined}
       >
         <Brand />
+
+        {/* Desktop nav */}
         <nav
-          className="ml-10 hidden items-center gap-6 md:flex"
+          className="ml-8 hidden items-center gap-5 md:flex"
           style={isDesktopApp ? ({ WebkitAppRegion: 'no-drag' } as React.CSSProperties) : undefined}
         >
           {navItems.map((item) => (
-            <NavItem key={item.to} to={item.to}>
+            <NavItem key={item.to} to={item.to} icon={item.icon}>
               {item.label}
             </NavItem>
           ))}
         </nav>
+
+        {/* Desktop right actions */}
         <div
           className="ml-auto hidden items-center gap-1 md:flex"
           style={isDesktopApp ? ({ WebkitAppRegion: 'no-drag' } as React.CSSProperties) : undefined}
         >
-          <DarkModeToggle dark={dark} onToggle={toggle} />
-          {!isDesktopApp && (
-            <Button variant="ghost" size="sm" onClick={() => logout()}>
-              Sign out
-            </Button>
-          )}
+          <UserMenu dark={dark} onToggle={toggle} />
         </div>
+
+        {/* Mobile hamburger */}
         <div className="ml-auto md:hidden">
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -167,8 +213,9 @@ function Navbar() {
                   <DropdownMenuItem
                     key={item.to}
                     onClick={() => navigate(item.to)}
-                    className={isActiveRoute(item.to) ? 'bg-accent text-accent-foreground font-medium' : undefined}
+                    className={`gap-2 ${isActiveRoute(item.to) ? 'bg-accent text-accent-foreground font-medium' : ''}`}
                   >
+                    <item.icon className="size-3.5" />
                     {item.label}
                   </DropdownMenuItem>
                 ))}
@@ -177,10 +224,16 @@ function Navbar() {
               <DropdownMenuGroup>
                 <DropdownMenuItem onClick={toggle} className="justify-between">
                   <span>Theme</span>
-                  {dark ? <Sun /> : <Moon />}
+                  {dark ? <Sun className="size-3.5" /> : <Moon className="size-3.5" />}
                 </DropdownMenuItem>
                 {!isDesktopApp && (
-                  <DropdownMenuItem onClick={() => logout()}>Sign out</DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => logout()}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <LogOut className="size-3.5 mr-2" />
+                    Sign out
+                  </DropdownMenuItem>
                 )}
               </DropdownMenuGroup>
             </DropdownMenuContent>

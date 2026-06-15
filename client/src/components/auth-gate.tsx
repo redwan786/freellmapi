@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Sparkles } from 'lucide-react'
 import { apiFetch, setToken, UNAUTHORIZED_EVENT } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -71,7 +72,9 @@ function AuthForm({ initialMode, allowToggle, onAuthed }: { initialMode: AuthMod
   return (
     <Centered>
       <div className="mb-6 flex items-center justify-center gap-2">
-        <span className="inline-block size-2 rounded-full bg-foreground" />
+        <div className="flex size-6 items-center justify-center rounded-md bg-foreground">
+          <Sparkles className="size-3.5 text-background" />
+        </div>
         <span className="font-semibold tracking-tight text-sm">FreeLLMAPI</span>
       </div>
       <div className="rounded-3xl border bg-card p-6 shadow-sm">
