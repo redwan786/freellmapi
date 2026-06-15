@@ -103,16 +103,14 @@ function UserMenu({ dark, onToggle }: { dark: boolean; onToggle: () => void }) {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild={true}>
-        <Button variant="ghost" size="sm" className="gap-1.5 px-2">
-          <span className="flex size-6 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground">
-            {initials}
-          </span>
-          <span className="hidden max-w-[120px] truncate text-xs text-muted-foreground lg:block">
-            {data?.email ?? ''}
-          </span>
-          <ChevronDown className="size-3 text-muted-foreground" />
-        </Button>
+      <DropdownMenuTrigger className="flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-accent transition-colors">
+        <span className="flex size-6 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground">
+          {initials}
+        </span>
+        <span className="hidden max-w-[120px] truncate text-xs text-muted-foreground lg:block">
+          {data?.email ?? ''}
+        </span>
+        <ChevronDown className="size-3 text-muted-foreground" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48">
         {data?.email && (
