@@ -29,7 +29,7 @@ function renderCell(value: unknown) {
   }
   const text = typeof value === 'object' ? JSON.stringify(value) : String(value)
   return (
-    <span className="block max-w-[360px] truncate" title={text}>
+    <span className="block max-w-[200px] truncate" title={text}>
       {text}
     </span>
   )
@@ -73,31 +73,31 @@ export default function DatabasePage() {
         description="Read-only view of the local SQLite database. Secrets (keys, hashes) are masked."
       />
 
-      <div className="flex gap-6 flex-col md:flex-row">
-        {/* Table list */}
-        <div className="md:w-56 shrink-0">
-          <div className="flex flex-row md:flex-col gap-1 overflow-x-auto md:overflow-visible">
+      <div className="flex gap-4 min-h-0">
+        {/* Table list — fixed sidebar */}
+        <div className="w-48 shrink-0">
+          <div className="flex flex-col gap-0.5">
             {tables.map(t => (
               <button
                 key={t.name}
                 onClick={() => selectTable(t.name)}
-                className={`flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm text-left whitespace-nowrap transition-colors ${
+                className={`flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm text-left transition-colors ${
                   selected === t.name
                     ? 'bg-accent text-accent-foreground font-medium'
                     : 'text-muted-foreground hover:text-foreground hover:bg-accent/50'
                 }`}
               >
-                <span className="font-mono">{t.name}</span>
-                <span className="text-xs tabular-nums opacity-70">{t.rowCount}</span>
+                <span className="font-mono truncate">{t.name}</span>
+                <span className="text-xs tabular-nums opacity-70 shrink-0">{t.rowCount}</span>
               </button>
             ))}
           </div>
         </div>
 
         {/* Table contents */}
-        <div className="flex-1 min-w-0">
+        <div className="flex-1 min-w-0 overflow-hidden">
           <div className="rounded-2xl border bg-card overflow-hidden">
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto max-w-full">
               {isLoading ? (
                 <div className="p-8 text-center text-sm text-muted-foreground">Loading…</div>
               ) : !data || data.columns.length === 0 ? (
