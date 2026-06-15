@@ -522,7 +522,7 @@ export default function KeysPage() {
             <div className="space-y-1.5">
               <Label className="text-xs">Platform</Label>
               <Select value={platform} onValueChange={(v) => setPlatform(v as Platform)}>
-                <SelectTrigger className="w-[220px]">
+                <SelectTrigger className="w-full sm:w-[220px]">
                   <SelectValue placeholder="Select provider" />
                 </SelectTrigger>
                 <SelectContent>
