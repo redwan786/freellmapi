@@ -295,7 +295,7 @@ export default function PlaygroundPage() {
   const canSend = !loading && !parsing && (input.trim().length > 0 || images.length > 0 || docs.length > 0)
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)]">
+    <div className="flex flex-col h-[calc(100vh-9rem)] sm:h-[calc(100vh-8rem)]">
       <PageHeader
         title="Playground"
         description="Send a chat completion through the router and see which provider serves it."

@@ -22,7 +22,6 @@ import PlaygroundPage from '@/pages/PlaygroundPage'
 import FallbackPage from '@/pages/FallbackPage'
 import EmbeddingsPage from '@/pages/EmbeddingsPage'
 import AnalyticsPage from '@/pages/AnalyticsPage'
-import PremiumPage from '@/pages/PremiumPage'
 import DatabasePage from '@/pages/DatabasePage'
 
 const queryClient = new QueryClient()
@@ -33,7 +32,6 @@ const navItems: { to: string; label: string; icon: LucideIcon }[] = [
   { to: '/keys',       label: 'Keys',        icon: KeyRound },
   { to: '/analytics',  label: 'Analytics',   icon: BarChart2 },
   { to: '/database',   label: 'Database',    icon: Database },
-  { to: '/premium',    label: 'Premium',     icon: Sparkles },
 ]
 
 function getPreferredDarkMode() {
@@ -90,11 +88,11 @@ function DarkModeToggle({ dark, onToggle }: { dark: boolean; onToggle: () => voi
 
 function Brand() {
   return (
-    <Link to="/" className="flex items-center gap-2 transition-opacity hover:opacity-70">
+    <Link to="/" className="flex items-center gap-2 transition-opacity hover:opacity-70 shrink-0">
       <div className="flex size-5 items-center justify-center rounded-md bg-foreground">
         <Sparkles className="size-3 text-background" />
       </div>
-      <span className="font-semibold tracking-tight text-sm">FreeLLMAPI</span>
+      <span className="font-semibold tracking-tight text-sm">MyFreeLLMAPI</span>
     </Link>
   )
 }
@@ -251,7 +249,7 @@ function App() {
         <AuthGate>
           <div className={`min-h-screen ${isDesktopApp ? 'desktop-backdrop' : 'bg-background'}`}>
             <Navbar />
-            <main className="max-w-6xl mx-auto px-6 py-8">
+            <main className="max-w-6xl mx-auto px-3 py-5 sm:px-6 sm:py-8">
               <Routes>
                 <Route path="/" element={<Navigate to="/models/chat" replace />} />
                 <Route path="/models" element={<Navigate to="/models/chat" replace />} />
@@ -262,7 +260,6 @@ function App() {
                 <Route path="/fallback" element={<Navigate to="/models/chat" replace />} />
                 <Route path="/analytics" element={<AnalyticsPage />} />
                 <Route path="/database" element={<DatabasePage />} />
-                <Route path="/premium" element={<PremiumPage />} />
                 <Route path="/test" element={<Navigate to="/playground" replace />} />
                 <Route path="/health" element={<Navigate to="/keys" replace />} />
               </Routes>

@@ -158,7 +158,7 @@ function UnifiedKeySection() {
         </div>
       )}
 
-      <div className="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs">
+      <div className="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-xs overflow-x-auto">
         <span className="text-muted-foreground">Base URL</span>
         <code className="font-mono">{baseUrl}</code>
         <span className="text-muted-foreground">Chat</span>

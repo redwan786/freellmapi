@@ -75,7 +75,7 @@ function AuthForm({ initialMode, allowToggle, onAuthed }: { initialMode: AuthMod
         <div className="flex size-6 items-center justify-center rounded-md bg-foreground">
           <Sparkles className="size-3.5 text-background" />
         </div>
-        <span className="font-semibold tracking-tight text-sm">FreeLLMAPI</span>
+        <span className="font-semibold tracking-tight text-sm">MyFreeLLMAPI</span>
       </div>
       <div className="rounded-3xl border bg-card p-6 shadow-sm">
         {/* Sign in / Sign up segmented toggle (hidden during first-run setup) */}
